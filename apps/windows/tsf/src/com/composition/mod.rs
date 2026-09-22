@@ -16,7 +16,7 @@ use windows::core::{Interface, Result};
 
 use qingjian_platform::protocol::{Frame, PreeditKind};
 
-pub(crate) use self::shared::Shared;
+pub(crate) use self::shared::{Shared, context_token};
 use self::sink::CompositionSink;
 use super::edit::{InputContext, anchor_rect, caret_rect, input_context};
 use super::service::SharedClient;

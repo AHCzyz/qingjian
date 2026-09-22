@@ -23,6 +23,13 @@ impl Router {
         let Some(c) = event.character.filter(|c| !c.is_control()) else {
             return self.apply_function_key(event);
         };
+        // 终端 / 控制台类宿主（conhost 及同类）：逐键直通、绝不挂组句。
+        // 这类宿主的键盘层在「输入法开着组句」时会吞掉数字 / 符号键（键根本没送到输入法，
+        // #28 的终端场景）；不挂组句就没有可吞的打开状态——和搜狗在终端里表现一致。
+        if self.console_host() {
+            self.engine.note_passthrough(c);
+            return Effect::Changed(Some(c.to_string()));
+        }
         // Caps 亮着无论中英模式都直接出大写英文；英文候选只在持久英文模式、Caps 灭、应用允许时给。
         let caps = event.modifiers.caps;
         let english = caps || event.modifiers.english_mode;
@@ -210,6 +217,7 @@ impl Router {
     }
 
     /// 当前模式开着全角就让 Core 转（数字后的 `.` 与小键盘的键保持半角）；转不了的原样交给应用并告知 Core。
+    /// （放行时若 DLL 本地还挂着未落定的组句，DLL 会吃下并走提交队列，见 key_sink 放行护栏。）
     fn apply_punctuation(&mut self, c: char, event: &KeyEvent) -> Effect {
         let english = event.modifiers.caps || event.modifiers.english_mode;
         if !codes::is_keypad(event.virtual_key)
@@ -304,7 +312,12 @@ impl Router {
         {
             return Effect::Changed(None);
         }
+        // 主键区数字：有候选就选（正常中文流程，无条件——v4 用末音节/混输做守卫污染了
+        // `w`+6 这类选词）；没有这一格（`gpt9` 只有 9 个以下候选）数字当内容进缓冲。
+        // 右侧小键盘数字不参与选词：组句里一律直输进缓冲（用户契约，与 `gpt6` 一致，
+        // 小键盘的键永不选候选、也不走「候选 + 数字」的提交路径）。
         if let Some(digit) = codes::digit(event)
+            && !codes::is_keypad(event.virtual_key)
             && (!self.engine.is_zhuyin_mode() || self.navigated)
         {
             if let Some(index) = self.slot_index(digit) {
@@ -314,6 +327,15 @@ impl Router {
             if self.engine.question_mode() {
                 return Effect::Changed(None);
             }
+            // 这一页没有第 N 格：数字是内容（`gpt9`、`wenti6`），进直输段原样呈现
+            self.engine.push(c);
+            return Effect::Changed(None);
+        }
+        // 小键盘键（数字与 `+ - * / .`）：上面已排除选词，到这里的都进缓冲直输，
+        // 无论音节是否打完整 —— 候选窗口 raw 呈现、空格 / 回车整体上屏（保序）。
+        if codes::is_keypad(event.virtual_key) {
+            self.engine.push(c);
+            return Effect::Changed(None);
         }
         if let Some(step) = codes::page_key(event, self.config.page_keys) {
             self.page(step);
@@ -329,6 +351,18 @@ impl Router {
         // 表达式 / 问字模式下的其他字符不进缓冲区（与 macOS 壳一致），辅码态里敲标点同理（码段随之清空）：
         // 都是先把高亮候选上屏，再按没在组句处理这个键、标点按组句外语义转全角
         if (c != '\'' && (expression || self.engine.question_mode())) || self.engine.in_aux() {
+            let committed = self.commit_highlighted();
+            let effect = self.apply_punctuation(c, event);
+            return with_prefix(Some(committed), effect, c);
+        }
+        // 混输 / 未完成（`gpt6`、`deepseek-`、`gpt,`）：数字与符号进缓冲的英文直输段，
+        // 候选窗以原样文本（Raw 兜底）呈现，空格 / 回车确认整体上屏（#28，用户要求的候选呈现）。
+        // 完整纯拼音（`wenti,`）：候选「问题」先上屏、标点再跟上（`问题，`），一次提交保序。
+        if c != '\'' && (self.mixed_buffer() || !self.trailing_syllable_complete()) {
+            self.engine.push(c);
+            return Effect::Changed(None);
+        }
+        if c != '\'' {
             let committed = self.commit_highlighted();
             let effect = self.apply_punctuation(c, event);
             return with_prefix(Some(committed), effect, c);
@@ -355,5 +389,39 @@ impl Router {
 
     fn composing(&self) -> bool {
         !self.engine.composition().is_empty()
+    }
+
+    /// 缓冲里已混入非拼音字符（数字 / 符号）：后续字符一律进缓冲继续混输。
+    /// （大写字母不会进缓冲，`?` 问字前缀不在可打印键路径上。）
+    fn mixed_buffer(&self) -> bool {
+        self.engine
+            .composition()
+            .text()
+            .bytes()
+            .any(|b| !b.is_ascii_lowercase() && b != b'\'')
+    }
+
+    /// 缓冲末尾音节是否已打完（`wenti`、`han` 完整；`gpt`、`zho` 的末尾仍是声母 / 前缀）。
+    /// 末音节未打完时数字不当选词键、符号按原样上屏：用户多半在打英文词或混合串
+    /// （`gpt6`、`deepseek-`，#28）。切分失败（双拼方案等 route 不认识的输入）退回旧行为。
+    fn trailing_syllable_complete(&self) -> bool {
+        let text = self.engine.composition().text();
+        if text.is_empty() {
+            return true;
+        }
+        match qingjian_core::parser::segment(text) {
+            Ok(segmentations) => segmentations.iter().any(|s| !s.last_is_partial()),
+            Err(_) => true,
+        }
+    }
+
+    /// 终端 / 控制台类宿主名单：这些宿主的键盘层在「输入法开着组句」时吞数字 / 符号键
+    /// （键根本送不到输入法，见 #28 终端场景），因此对它们逐键直通、绝不挂组句，
+    /// 与搜狗在终端里的表现一致。conhost 是系统控制台（cmd / powershell）；
+    /// 名单按「同样会吞键的控制台类宿主」继续追加。其余终端（如 Windows
+    /// Terminal，原生渲染组句）不在名单里，照常中文组句。
+    fn console_host(&self) -> bool {
+        self.focused_app()
+            .is_some_and(|app| app.to_ascii_lowercase().as_str() == "conhost.exe")
     }
 }

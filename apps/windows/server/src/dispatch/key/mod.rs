@@ -6,6 +6,9 @@ mod effect;
 mod input;
 mod shortcut;
 
+#[cfg(test)]
+mod fix_tests;
+
 pub(super) use self::codes::{ESCAPE, RETURN};
 pub(super) use self::effect::Effect;
 

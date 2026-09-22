@@ -24,11 +24,14 @@ fn chinese_punctuation_is_full_width_only_when_not_composing() {
     let keypad_period = KeyEvent::new(0x6E, Some('.'), Default::default());
     assert_eq!(press(&mut router, keypad_period).0, KeyOutcome::Passthrough);
 
-    // 组句中：标点进英文直输段，不转。
+    // 组句中：完整纯拼音遇标点 = 候选先上屏、标点紧随一次提交（`ni,` → `你，`），保序
+    // （不再进直输段：直输段会让整体变 raw，中文标点场景不可用，#28 定稿契约）。
     type_letters(&mut router, "ni");
-    let (outcome, commit, frame) = press(&mut router, comma);
-    assert_eq!((outcome, commit), (KeyOutcome::Consumed, None));
-    assert!(!frame.is_empty(), "组句应还在");
+    let (outcome, commit, _) = press(&mut router, comma);
+    assert_eq!(
+        (outcome, commit),
+        (KeyOutcome::Consumed, Some("你，".to_owned()))
+    );
 
     // 状态条上关掉全角：原样交给应用。
     router.handle(ClientMessage::Commit { session: SESSION });

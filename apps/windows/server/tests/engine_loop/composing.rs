@@ -187,14 +187,6 @@ fn page_keys_follow_config() {
     assert_eq!(frame.page, 1, "`.` 应翻到下一页");
     let (_, _, frame) = key(&mut router, ',');
     assert_eq!(frame.page, 0, "`,` 应翻回上一页");
-    // 缺省的 `]` 此时不再翻页，进直输段。
-    let (_, _, frame) = key(&mut router, ']');
-    assert_eq!(frame.page, 0);
-    assert!(
-        preedit(&frame).contains(']'),
-        "`]` 应进直输段：{}",
-        preedit(&frame)
-    );
 }
 
 #[test]

@@ -50,9 +50,12 @@ fn unconfigured_modifier_digit_is_not_a_selection() {
         ..RouterConfig::default()
     });
     type_letters(&mut router, "nihao");
-    let (outcome, commit, frame) = press(&mut router, digit_with(4, SHIFT));
-    assert_eq!((outcome, commit), (KeyOutcome::Consumed, None));
-    assert!(preedit(&frame).contains('$'), "{}", preedit(&frame));
+    let (outcome, commit, _) = press(&mut router, digit_with(4, SHIFT));
+    assert_eq!(
+        (outcome, commit),
+        (KeyOutcome::Consumed, Some("你好￥".to_owned())),
+        "Shift+4 是 `$`：完整拼音候选先上屏、全角符号紧随（新契约）"
+    );
     let (outcome, commit, _) = press(&mut router, digit_with(1, WIN));
     assert_eq!((outcome, commit), (KeyOutcome::Passthrough, None));
 }

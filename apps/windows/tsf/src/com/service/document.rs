@@ -5,6 +5,7 @@ use windows::Win32::UI::TextServices::ITfContext;
 use windows::core::Ref;
 
 use super::TextService_Impl;
+use crate::com::composition::context_token;
 use crate::com::edit::{request_selection, request_update};
 use crate::com::log::log;
 
@@ -62,21 +63,28 @@ impl TextService_Impl {
             return;
         };
         log(&format!("失焦上屏: {text:?}"));
+        let token = context_token(&context);
+        let fresh =
+            self.shared
+                .enqueue_update(token, text.filter(|t| !t.is_empty()), String::new());
+        if !fresh {
+            return;
+        }
         let requested = request_update(
             &context,
             self.client_id.get(),
             self.engine.clone(),
             self.shared.clone(),
-            text.filter(|t| !t.is_empty()),
-            String::new(),
         );
         if let Err(error) = requested {
+            self.shared.clear_pending_update(token);
             log(&format!("失焦上屏的编辑会话没被受理: {error}"));
             self.shared.reset();
         }
     }
 
-    /// 经异步编辑会话把上屏文本 + 组句拼音行写进文档。
+    /// 经异步编辑会话把上屏文本 + 组句拼音行写进文档。快照进队列合并
+    /// （同一时刻至多一个 in-flight 编辑会话），队列空时才新发请求。
     pub(super) fn update_document(
         &self,
         pic: Ref<ITfContext>,
@@ -97,15 +105,19 @@ impl TextService_Impl {
             ));
             return;
         };
+        let token = context_token(context);
+        let fresh = self.shared.enqueue_update(token, commit, preedit);
+        if !fresh {
+            return;
+        }
         if let Err(error) = request_update(
             context,
             self.client_id.get(),
             self.engine.clone(),
             self.shared.clone(),
-            commit,
-            preedit,
         ) {
-            log(&format!("请求组句更新失败: {error}"));
+            self.shared.clear_pending_update(token);
+            log(&format!("请求组句更新失败，已清待落定快照: {error}"));
         }
     }
 }

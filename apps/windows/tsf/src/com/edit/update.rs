@@ -12,11 +12,11 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{Error, Result, implement};
 
-use crate::com::composition::{Shared, apply};
+use crate::com::composition::{Shared, apply, context_token};
 use crate::com::log::log;
 use crate::com::service::SharedClient;
 
-/// 一次性的读写会话：把本次按键的组句更新写进 `context`。
+/// 一次性的读写会话：把队列里最新一次按键的组句更新写进 `context`。
 #[implement(ITfEditSession)]
 pub(crate) struct UpdateSession {
     /// 目标文档上下文。
@@ -27,25 +27,28 @@ pub(crate) struct UpdateSession {
 
     /// 组句状态。
     shared: Rc<Shared>,
-
-    /// 本次要落定上屏的文本。
-    commit: Option<String>,
-
-    /// 本次组句拼音行；空串表示收起组句。
-    preedit: String,
 }
 
 impl ITfEditSession_Impl for UpdateSession_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
         // 从框架的 C++ 调进来：panic 不能越过 FFI。
+        // 应用的是本上下文的队列快照（同一上下文只有一个 in-flight 会话，后到的按键结果已合并进来），
+        // 只取自己那份：跨输入框的更新各排各的队，不会把 B 的拼音写进 A 的文档。
+        // 保证 async 会话按服务器响应顺序落盘，不出现后到先写（#28）。
+        let Some((commit, preedit)) = self
+            .shared
+            .take_pending_update(context_token(&self.context))
+        else {
+            return Ok(());
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             apply(
                 &self.shared,
                 &self.engine,
                 &self.context,
                 ec,
-                self.commit.as_deref(),
-                &self.preedit,
+                commit.as_deref(),
+                &preedit,
             )
         }));
         match result {
@@ -63,20 +66,17 @@ impl ITfEditSession_Impl for UpdateSession_Impl {
 }
 
 /// 请求一个异步读写会话。`Ok` 只说明已受理，写入结果在回调里记日志。
+/// 快照本身放在 [`Shared::pending_update`]，回调时取最新值。
 pub(crate) fn request_update(
     context: &ITfContext,
     client_id: u32,
     engine: SharedClient,
     shared: Rc<Shared>,
-    commit: Option<String>,
-    preedit: String,
 ) -> Result<()> {
     let session = UpdateSession {
         context: context.clone(),
         engine,
         shared,
-        commit,
-        preedit,
     };
     request(context, client_id, session.into(), TF_ES_READWRITE)
 }

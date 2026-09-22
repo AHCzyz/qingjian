@@ -234,10 +234,23 @@ impl TextService_Impl {
                     preedit,
                 },
                 Some(c),
-            ) if insertable && preedit.is_empty() => {
+            ) if insertable && preedit.is_empty() && !self.shared.has_pending_update() => {
                 let mut text = commit.unwrap_or_default();
                 text.push(c);
                 self.update_document(pic, Some(text), String::new());
+                true
+            }
+            // 放行但本地还挂着未落定的组句 / 编辑会话（#28 的 `gpt-6` → `-6gpt` 时序竞态）：
+            // 交还应用会把字符插到组句前，吃下走提交队列原样落定；队列落定后恢复放行。
+            (
+                Next::Document {
+                    consumed: false, ..
+                },
+                Some(c),
+            ) if insertable
+                && (self.shared.has_pending_update() || self.shared.has_composition()) =>
+            {
+                self.update_document(pic, Some(c.to_string()), String::new());
                 true
             }
             // 放行的功能键：Server 没动缓冲区，交还应用（应用处理这个键时光标可能会移）。
